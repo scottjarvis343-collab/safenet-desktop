@@ -1,0 +1,41 @@
+# Node / Vite / Tauri web
+node_modules/
+dist/
+.vite/
+*.log
+
+# Rust / Tauri
+target/
+src-tauri/target/
+src-tauri/.tauri-lock
+
+# Go
+*.exe
+*.test
+*.out
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+
+# Env & secrets
+.env
+.env.*
+infra/certs/
+infra/certbot/
+*.pem
+*.key
+*.pfx
+
+# Build artifacts / installers
+*.zip
+*.7z
+*.msi
+*.pkg
+*.dmg
+
+# App caches
+pnpm-lock.yaml
+yarn.lock
+package-lock.json

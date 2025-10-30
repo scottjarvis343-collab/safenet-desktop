@@ -1,0 +1,18 @@
+{
+  "identifier": "default",
+  "description": "Capability for the main window",
+  "local": true,
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:app:default",
+    "core:event:default",
+    "core:image:default",
+    "core:menu:default",
+    "core:tray:default",
+    "core:path:default",
+    "core:resources:default",
+    "core:webview:default",
+    "core:window:default"
+  ]
+}

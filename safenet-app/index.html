@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>SafeNet Desktop</title>
+    <link rel="stylesheet" href="/src/style.css" />
+    <style>
+      /* Tiny defaults if style.css missing */
+      body{font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,Arial;margin:0;background:#fafafa}
+      .container{max-width:720px;margin:32px auto;padding:0 16px}
+      .title{font-size:28px;margin-bottom:16px}
+      .card{border:1px solid #e5e7eb;border-radius:12px;padding:16px;margin-bottom:16px;background:#fff}
+      .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+      .lbl{display:block;font-weight:600;margin-bottom:8px}
+      .badge{padding:4px 8px;border-radius:9999px;border:1px solid #e5e7eb;font-size:12px}
+      .badge.running{background:#ecfdf5;border-color:#10b981}
+      .badge["starting..."], .badge.starting{background:#eef2ff;border-color:#6366f1}
+      .badge.pairing{background:#eef2ff;border-color:#6366f1}
+      .badge.error{background:#fff7ed;border-color:#f97316}
+      input{padding:8px;border:1px solid #e5e7eb;border-radius:8px}
+      button{padding:8px 12px;border:1px solid #d1d5db;border-radius:8px;background:#111827;color:#fff;cursor:pointer}
+      button.secondary{background:#374151}
+      pre{white-space:pre-wrap;background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:12px;margin:0}
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="title">SafeNet Desktop (Dev)</div>
+
+      <div class="card">
+        <div class="row" style="justify-content:space-between">
+          <div>
+            <div class="lbl">Daemon status</div>
+            <span id="daemonBadge" class="badge starting">starting...</span>
+          </div>
+          <div class="row">
+            <button id="startDaemon">Start Daemon</button>
+            <button id="stopDaemon" class="secondary">Stop Daemon</button>
+            <a id="healthLink" href="http://127.0.0.1:8765/health" target="_blank" style="margin-left:8px">Open Health</a>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="lbl">Pairing</div>
+        <div class="row">
+          <input id="pairCode" placeholder="Enter pairing code" />
+          <button id="pairBtn">Pair</button>
+          <button id="refreshBtn" class="secondary">Refresh details</button>
+          <span id="pairBadge" class="badge">not paired</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="lbl">Device details</div>
+        <pre id="pairOut">—</pre>
+      </div>
+    </div>
+
+    <!-- Vite dev entry -->
+    <script type="module" src="/src/main.ts" defer></script>
+  </body>
+</html>

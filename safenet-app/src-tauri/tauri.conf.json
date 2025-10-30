@@ -1,0 +1,27 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "SafeNet",
+  "version": "0.1.0",
+  "identifier": "com.safenet.app",
+
+  "build": {
+    "beforeDevCommand": "vite --port 1421",
+    "beforeBuildCommand": "vite build",
+    "devUrl": "http://localhost:1421/",
+    "frontendDist": "../dist"
+  },
+
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "SafeNet Desktop (Dev)",
+        "width": 1100,
+        "height": 720,
+        "resizable": true,
+        "visible": true,
+        "url": "index.html"
+      }
+    ]
+  }
+}

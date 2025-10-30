@@ -1,0 +1,13 @@
+﻿.container { max-width: 720px; margin: 32px auto; font-family: ui-sans-serif, system-ui, Segoe UI, Roboto, Arial; }
+.title { font-size: 28px; margin-bottom: 16px; }
+.card { border: 1px solid #e5e7eb; border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+.lbl { display:block; font-weight:600; margin-bottom:8px; }
+.row { display:flex; gap:8px; align-items:center; flex-wrap: wrap; }
+
+.badge { padding: 4px 8px; border-radius: 9999px; border:1px solid #e5e7eb; font-size: 12px; }
+.badge.running { background:#ecfdf5; border-color:#10b981; }
+.badge.stopped { background:#fef2f2; border-color:#ef4444; }
+.badge.starting { background:#eef2ff; border-color:#6366f1; }
+.badge.error { background:#fff7ed; border-color:#f97316; }
+.badge.not-paired { background:#f3f4f6; border-color:#d1d5db; }
+.badge.pairing { background:#eef2ff; border-color:#6366f1; }
