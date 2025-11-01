@@ -1,3 +1,4 @@
+// C:\safenet-desktop\daemon\main.go
 package main
 
 import (
@@ -17,6 +18,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"syscall"
@@ -267,7 +269,6 @@ func apiGET(ctx context.Context, token, pathWithQuery string) ([]byte, int, erro
 	return body, resp.StatusCode, nil
 }
 
-
 func tryResolveCID(ctx context.Context, token, deviceID, uniqueID string) (cid string, updatedDeviceID string) {
 	if deviceID != "" {
 		if b, code, err := apiGET(ctx, token, "/devices/"+url.PathEscape(deviceID)); err == nil && code == 200 {
@@ -346,7 +347,7 @@ func psExec(args ...string) ([]byte, []byte, error) {
 	return stdout.Bytes(), stderr.Bytes(), err
 }
 
-// --- NEW: netsh helpers (preferred on Windows) ---
+// --- netsh helpers (preferred on Windows) ---
 
 func runNetsh(args ...string) error {
 	cmd := exec.Command("netsh", args...)
@@ -371,10 +372,12 @@ func applyDNSNetsh(interfaces []string, primaryHost, secondaryHost, cid string) 
 	if strings.TrimSpace(cid) != "" {
 		_ = runNetsh("dns", "delete", "encryption", fmt.Sprintf("server=%s", pIP))
 		tmpl := fmt.Sprintf("https://dns.safenettechnology.com/dns-query/%s", cid)
+		log.Printf("[DEBUG] Applying DoH mapping → %s", tmpl)
 		if err := runNetsh("dns", "add", "encryption",
 			fmt.Sprintf("server=%s", pIP),
 			fmt.Sprintf("dohtemplate=%s", tmpl),
-			"autoupgrade=no", "udpfallback=no",
+			"autoupgrade=yes", // ensure permanent Auto-DoH
+			"udpfallback=no",
 		); err != nil {
 			return fmt.Errorf("add DoH mapping: %w", err)
 		}
@@ -498,6 +501,90 @@ func netshEncryptionShow() (string, error) {
 		return "", fmt.Errorf("netsh dns show encryption: %v (%s)", err, buf.String())
 	}
 	return buf.String(), nil
+}
+
+// blockIPv6DNS creates firewall rules to block all outbound IPv6 DNS (UDP/TCP 53)
+func blockIPv6DNS() {
+	if runtime.GOOS != "windows" {
+		return
+	}
+	log.Printf("[DEBUG] Applying IPv6 DNS firewall block rules...")
+	_ = runNetsh("advfirewall", "firewall", "add", "rule",
+		"name=SafeNet Block DNS (UDP 53 v6)", "dir=out", "action=block",
+		"protocol=UDP", "remoteport=53", "profile=any", "enable=yes")
+	_ = runNetsh("advfirewall", "firewall", "add", "rule",
+		"name=SafeNet Block DNS (TCP 53 v6)", "dir=out", "action=block",
+		"protocol=TCP", "remoteport=53", "profile=any", "enable=yes")
+}
+
+// unblockIPv6DNS removes the IPv6 DNS firewall rules created by blockIPv6DNS
+func unblockIPv6DNS() {
+	if runtime.GOOS != "windows" {
+		return
+	}
+	log.Printf("[DEBUG] Removing IPv6 DNS firewall block rules...")
+	_ = runNetsh("advfirewall", "firewall", "delete", "rule",
+		"name=SafeNet Block DNS (UDP 53 v6)")
+	_ = runNetsh("advfirewall", "firewall", "delete", "rule",
+		"name=SafeNet Block DNS (TCP 53 v6)")
+}
+// --- Auto-DoH registry and PowerShell DoH mapping helpers ---
+
+// Sets HKLM\SYSTEM\...\Dnscache\Parameters\EnableAutoDoh = 2
+func windowsEnableAutoDoh() {
+	if runtime.GOOS != "windows" {
+		return
+	}
+	_, _, _ = psExec(`reg add "HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters" /v EnableAutoDoh /t REG_DWORD /d 2 /f`)
+}
+
+// Restarts the DNS Client service so mappings take effect on stubborn builds.
+func windowsRestartDnsClient() {
+	if runtime.GOOS != "windows" {
+		return
+	}
+	_, _, _ = psExec(`Try { Restart-Service -Name Dnscache -Force -ErrorAction Stop } Catch {}`)
+}
+
+// Uses PowerShell API (Win11/late Win10) to add DoH mapping with AutoUpgrade=true and no UDP fallback.
+func addDohMappingPowerShell(ip, cid string) error {
+	if runtime.GOOS != "windows" {
+		return fmt.Errorf("powershell DoH mapping is windows-only")
+	}
+	if strings.TrimSpace(ip) == "" || strings.TrimSpace(cid) == "" {
+		return fmt.Errorf("missing ip or cid")
+	}
+	tmpl := fmt.Sprintf("https://dns.safenettechnology.com/dns-query/%s", cid)
+
+	script := `
+param($Ip, $Tpl)
+$cmd = Get-Command Add-DnsClientDohServerAddress -ErrorAction SilentlyContinue
+if (-not $cmd) { throw "Add-DnsClientDohServerAddress not available" }
+Try { Remove-DnsClientDohServerAddress -ServerAddress $Ip -ErrorAction SilentlyContinue } Catch {}
+Add-DnsClientDohServerAddress -ServerAddress $Ip -DohTemplate $Tpl -AutoUpgrade $true -AllowFallbackToUdp $false -ErrorAction Stop
+`
+	_, stderr, err := psExec(script, "-args", ip, tmpl)
+	if err != nil {
+		return fmt.Errorf("Add-DnsClientDohServerAddress failed: %v (%s)", err, string(stderr))
+	}
+	return nil
+}
+
+// --- IPv6 + plaintext hardening helpers ---
+
+// Remove all configured IPv6 DNS server addresses on specified interfaces (or all "Up" if none).
+
+// Add outbound firewall rules to block plaintext DNS on v4 and v6 (idempotent).
+func windowsBlockPlainDNSAll() {
+	if runtime.GOOS != "windows" {
+		return
+	}
+	// v4
+	_, _, _ = psExec(`netsh advfirewall firewall add rule name="SafeNet Block DNS (UDP 53)" dir=out action=block protocol=UDP remoteport=53`)
+	_, _, _ = psExec(`netsh advfirewall firewall add rule name="SafeNet Block DNS (TCP 53)" dir=out action=block protocol=TCP remoteport=53`)
+	// v6
+	_, _, _ = psExec(`netsh advfirewall firewall add rule name="SafeNet Block DNS (UDP 53, v6)" dir=out action=block protocol=UDP remoteport=53`)
+	_, _, _ = psExec(`netsh advfirewall firewall add rule name="SafeNet Block DNS (TCP 53, v6)" dir=out action=block protocol=TCP remoteport=53`)
 }
 
 /* ---------- routes ---------- */
@@ -635,16 +722,16 @@ func getConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	m := map[string]any{
-		"token":       c.Token,
-		"deviceId":    c.DeviceID,
-		"cid":         c.CID,
-		"deviceName":  c.DeviceName,
-		"uniqueId":    uq,
-		"updatedAt":   c.UpdatedAt,
-		"enforceDns":  c.EnforceDNS,
-		"dnsPrimary":  c.DNSPrimary,
+		"token":        c.Token,
+		"deviceId":     c.DeviceID,
+		"cid":          c.CID,
+		"deviceName":   c.DeviceName,
+		"uniqueId":     uq,
+		"updatedAt":    c.UpdatedAt,
+		"enforceDns":   c.EnforceDNS,
+		"dnsPrimary":   c.DNSPrimary,
 		"dnsSecondary": c.DNSSecondary,
-		"interfaces":  c.Interfaces,
+		"interfaces":   c.Interfaces,
 	}
 	jsonOK(w, m)
 }
@@ -746,6 +833,15 @@ func applyDNSHandler(w http.ResponseWriter, r *http.Request) {
 	conf.Interfaces = req.Interfaces
 	_ = writeConfig(conf)
 
+	// Sticky + OS auto-upgrade to DoH
+	windowsEnableAutoDoh()
+	_ = addDohMappingPowerShell(pIP, cid) // ignore if API missing
+	windowsRestartDnsClient()
+
+	// Harden: clear IPv6 DNS and block plaintext DNS (v4+v6)
+	windowsResetIPv6Servers(req.Interfaces)
+	windowsBlockPlainDNSAll()
+
 	jsonOK(w, map[string]any{
 		"ok":         true,
 		"enforced":   true,
@@ -765,6 +861,7 @@ func resetDNSHandler(w http.ResponseWriter, r *http.Request) {
 		Interfaces []string `json:"interfaces,omitempty"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
+	unblockIPv6DNS()
 	if err := windowsResetDNS(req.Interfaces); err != nil {
 		jsonErr(w, http.StatusInternalServerError, "reset failed: "+err.Error())
 		return
@@ -817,7 +914,7 @@ func dnsEnforceHandler(w http.ResponseWriter, r *http.Request) {
 	conf.DNSSecondary = s
 	conf.Interfaces = req.Interfaces
 	_ = writeConfig(conf)
-	_ = windowsApplyDNS(p, s, req.Interfaces) // okay if it occasionally fails; watchdog reapplies
+	_ = windowsApplyDNS(p, s, req.Interfaces) // watchdog may re-apply
 	jsonOK(w, map[string]any{"ok": true, "enforced": true, "primary": p, "secondary": s})
 }
 
@@ -852,6 +949,70 @@ func dnsStatusHandler(w http.ResponseWriter, r *http.Request) {
 		"servers":    servers,
 		"encryption": enc,
 	})
+}
+
+// NEW: /resolve_ipv4?host=example.com – helper for UI
+var ipv4Re = regexp.MustCompile(`^\d{1,3}(?:\.\d{1,3}){3}$`)
+
+func resolveIPv4Host(host string) (string, error) {
+	if ipv4Re.MatchString(host) {
+		return host, nil
+	}
+	return firstIPv4(host)
+}
+
+func resolveIPv4Handler(w http.ResponseWriter, r *http.Request) {
+	host := strings.TrimSpace(r.URL.Query().Get("host"))
+	if host == "" {
+		jsonErr(w, 400, "host required")
+		return
+	}
+	ip, err := resolveIPv4Host(host)
+	if err != nil {
+		jsonErr(w, 400, "resolve failed: "+err.Error())
+		return
+	}
+	jsonOK(w, map[string]any{"ok": true, "host": host, "ipv4": ip})
+}
+
+// NEW: /force_doh – reapply DoH mapping using stored CID + primary
+func forceDohHandler(w http.ResponseWriter, r *http.Request) {
+	if runtime.GOOS != "windows" {
+		jsonErr(w, http.StatusNotImplemented, "windows only")
+		return
+	}
+	conf, _ := readConfig()
+	if conf == nil || strings.TrimSpace(conf.CID) == "" || strings.TrimSpace(conf.DNSPrimary) == "" {
+		jsonErr(w, 400, "missing CID or DNS primary; call /apply_dns first")
+		return
+	}
+	if err := applyDNSNetsh(conf.Interfaces, conf.DNSPrimary, conf.DNSSecondary, conf.CID); err != nil {
+		_ = windowsApplyDNS(conf.DNSPrimary, conf.DNSSecondary, conf.Interfaces)
+	}
+	windowsEnableAutoDoh()
+	_ = addDohMappingPowerShell(conf.DNSPrimary, conf.CID)
+	windowsRestartDnsClient()
+
+	enc, _ := netshEncryptionShow()
+	jsonOK(w, map[string]any{"ok": true, "encryption": enc, "cid": conf.CID})
+}
+
+// OPTIONAL: /harden_dns – re-run IPv6 cleanup + plaintext blocks + Auto-DoH
+func hardenDnsHandler(w http.ResponseWriter, r *http.Request) {
+	if runtime.GOOS != "windows" {
+		jsonErr(w, http.StatusNotImplemented, "windows only")
+		return
+	}
+	conf, _ := readConfig()
+	var ifs []string
+	if conf != nil {
+		ifs = conf.Interfaces
+	}
+	windowsResetIPv6Servers(ifs)
+	windowsBlockPlainDNSAll()
+	windowsEnableAutoDoh()
+	windowsRestartDnsClient()
+	jsonOK(w, map[string]any{"ok": true})
 }
 
 /* ---------- watchdog ---------- */
@@ -931,7 +1092,6 @@ func startDNSWatchdog(ctx context.Context) {
 					}
 				}
 				if needApply {
-					// Prefer netsh; fallback to PowerShell if needed
 					if err := applyDNSNetsh(conf.Interfaces, conf.DNSPrimary, conf.DNSSecondary, conf.CID); err != nil {
 						_ = windowsApplyDNS(conf.DNSPrimary, conf.DNSSecondary, conf.Interfaces)
 					}
@@ -941,6 +1101,90 @@ func startDNSWatchdog(ctx context.Context) {
 	}()
 }
 
+// IPv6 DNS watchdog — periodically clears any re-added IPv6 DNS servers
+func startIPv6Watchdog(ctx context.Context) {
+	if runtime.GOOS != "windows" {
+		return
+	}
+
+	// Run once immediately at startup
+	go func() {
+		conf, _ := readConfig()
+		if conf != nil && conf.EnforceDNS {
+			log.Printf("[DEBUG] IPv6 watchdog initial cleanup starting...")
+			windowsResetIPv6Servers(conf.Interfaces)
+			log.Printf("[DEBUG] IPv6 watchdog initial cleanup complete")
+		}
+	}()
+
+	// Then keep checking every 10 seconds
+	ticker := time.NewTicker(10 * time.Second)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				conf, err := readConfig()
+				if err != nil {
+					continue
+				}
+				if conf != nil && conf.EnforceDNS {
+					windowsResetIPv6Servers(conf.Interfaces)
+					log.Printf("[DEBUG] IPv6 watchdog cleared DNS servers on active interfaces")
+				}
+			}
+		}
+	}()
+}
+
+
+func windowsResetIPv6Servers(interfaces []string) {
+	if runtime.GOOS != "windows" {
+		return
+	}
+
+	// 1) Try PowerShell first
+	if len(interfaces) > 0 {
+		script := `
+param($Ifs)
+foreach ($alias in $Ifs.Split(',')) {
+  try {
+    $a = Get-DnsClient | Where-Object { $_.InterfaceAlias -eq $alias -and $_.AddressFamily -eq 23 }
+    if ($a) {
+      Set-DnsClientServerAddress -InterfaceIndex $a.InterfaceIndex -ResetServerAddresses -ErrorAction Stop
+    }
+  } catch {}
+}
+`
+		_, _, _ = psExec(script, "-args", strings.Join(interfaces, ","))
+	} else {
+		script := `
+$ifs = Get-DnsClient | Where-Object { $_.InterfaceOperationalStatus -eq "Up" -and $_.AddressFamily -eq 23 }
+foreach ($i in $ifs) {
+  try {
+    Set-DnsClientServerAddress -InterfaceIndex $i.InterfaceIndex -ResetServerAddresses -ErrorAction Stop
+  } catch {}
+}
+`
+		_, _, _ = psExec(script)
+	}
+
+	// 2) Fallback: use netsh to forcibly clear IPv6 DNS on all adapters
+	out, _, _ := psExec(`(Get-NetAdapter | ? Status -eq 'Up').InterfaceAlias | ConvertTo-Json -Compress`)
+	var aliases []string
+	_ = json.Unmarshal([]byte(strings.TrimSpace(string(out))), &aliases)
+	for _, alias := range aliases {
+		if alias == "" {
+			continue
+		}
+		_ = runNetsh("interface", "ipv6", "set", "dnsservers", fmt.Sprintf(`name="%s"`, alias), "none")
+	}
+}
+
+
+
 /* ---------- main ---------- */
 
 func main() {
@@ -949,8 +1193,10 @@ func main() {
 		log.Fatalf("safenet-daemon: port %s already in use: %v", addr, err)
 	}
 	defer l.Close()
+	
 
 	_, _ = ensureUniqueID()
+	blockIPv6DNS()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/debug/last_pair_req", debugLastPairReq)
@@ -964,6 +1210,9 @@ func main() {
 	mux.HandleFunc("/dns_status", dnsStatusHandler)
 	mux.HandleFunc("/dns_enforce", dnsEnforceHandler)
 	mux.HandleFunc("/dns_policy", dnsPolicyHandler)
+	mux.HandleFunc("/resolve_ipv4", resolveIPv4Handler) // helper
+	mux.HandleFunc("/force_doh", forceDohHandler)       // repair endpoint
+	mux.HandleFunc("/harden_dns", hardenDnsHandler)      // optional harden endpoint
 
 	srv := &http.Server{
 		Handler:      withCORS(mux),
@@ -982,8 +1231,8 @@ func main() {
 		_ = srv.Shutdown(context.Background())
 		close(idleConnsClosed)
 	}()
-
 	startDNSWatchdog(ctx)
+	startIPv6Watchdog(ctx)
 
 	log.Printf("safenet-daemon: listening on http://%s", addr)
 	go func() {

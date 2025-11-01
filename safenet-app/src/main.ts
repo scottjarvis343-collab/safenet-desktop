@@ -11,11 +11,78 @@ const HEALTH  = `${ROOT}/health`;
 const PAIR    = `${ROOT}/pair`;
 const CONFIG  = `${ROOT}/config`;
 const REFRESH = `${ROOT}/refresh`;
+const CHILD_MODE = true;
+const POLL_MS = 10000;
 
 // ---- SafeNet DNS to apply (EDIT if needed) -------------------------------
-// Hostnames are OK: the daemon resolves them to IPv4.
 const PRIMARY_DNS   = "dns.safenettechnology.com";
-const SECONDARY_DNS = ""; // optional
+const SECONDARY_DNS = "";
+
+// ---- pairing state (NEW) --------------------------------------------------
+let isPaired = false;
+let currentCid = "";
+
+// small show/hide helpers
+function hide(el?: HTMLElement | null) { if (el) el.style.display = "none"; }
+function show(el?: HTMLElement | null) { if (el) el.style.display = ""; }
+
+// ---- NEW: fetch helpers with timeout & wait-for-daemon --------------------
+async function fetchWithTimeout(input: RequestInfo, init: RequestInit = {}, timeoutMs = 1500) {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(input, { ...init, signal: controller.signal, cache: "no-store" });
+    clearTimeout(id);
+    return res;
+  } catch (e) {
+    clearTimeout(id);
+    throw e;
+  }
+}
+
+async function waitForDaemon(maxAttempts = 25, delayMs = 350): Promise<boolean> {
+  for (let i = 0; i < maxAttempts; i++) {
+    try {
+      const r = await fetchWithTimeout(HEALTH, {}, 1000);
+      if (r.ok) return true;
+    } catch {}
+    await new Promise(res => setTimeout(res, delayMs));
+  }
+  return false;
+}
+
+// ---- Safe Tauri invoke with HTTP fallback ----------------------------------
+async function i<T = any>(cmd: string, args?: any): Promise<T> {
+  const tauriInvoke = (window as any).__TAURI__?.invoke as
+    | ((cmd: string, args?: any) => Promise<any>)
+    | undefined;
+
+  if (tauriInvoke) return await tauriInvoke(cmd, args);
+
+  // HTTP fallback to daemon
+  switch (cmd) {
+    case "apply_dns": {
+      const r = await fetch(`${ROOT}/apply_dns`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          primary: args?.primary ?? PRIMARY_DNS,
+          secondary: args?.secondary ?? "",
+        }),
+      });
+      return (await r.text()) as any;
+    }
+    case "dns_status": {
+      const r = await fetch(`${ROOT}/dns_status`, { cache: "no-store" });
+      return (await r.text()) as any;
+    }
+    case "daemon_start":
+    case "daemon_stop":
+      return "ok" as any;
+    default:
+      throw new Error(`invoke unavailable for ${cmd}`);
+  }
+}
 
 // ---- DOM helpers -----------------------------------------------------------
 const el = <T extends HTMLElement>(id: string) => document.getElementById(id) as T | null;
@@ -30,9 +97,7 @@ const $pairBadge    = () => el<HTMLSpanElement>("pairBadge");
 const $daemonBadge  = () => el<HTMLSpanElement>("daemonBadge");
 const $pairOut      = () => el<HTMLPreElement>("pairOut");
 
-// Will be created dynamically if absent:
 let $applyDNSBtnEl: HTMLButtonElement | null = null;
-let $resetDNSBtnEl: HTMLButtonElement | null = null;
 let $dnsStatusBtnEl: HTMLButtonElement | null = null;
 
 function setDaemonBadge(s: "starting..." | "running") {
@@ -55,7 +120,6 @@ function updateDeviceInfo(data: any) {
   const out = $pairOut(); if (!out) return;
   const lines: string[] = [];
 
-  // normalize common fields
   const cid        = data?.cid ?? data?.device?.cid ?? data?.user?.cid ?? data?.dns?.clientId;
   const deviceId   = data?.deviceId ?? data?.device?.id;
   const deviceName = data?.deviceName ?? data?.device?.deviceName ?? data?.device?.name;
@@ -79,18 +143,51 @@ async function safeJson(res: Response) {
   catch { return { body: null as any, raw: text }; }
 }
 
+// ---- UI gating (NEW) -------------------------------------------------------
+function renderUI() {
+  // banner/status in your existing device-details box
+  const out = $pairOut();
+  if (out) {
+    out.textContent = isPaired
+      ? `This device is protected by SafeNet\nCID: ${currentCid || "(unknown)"}\nFiltering is enforced at the system level.`
+      : `Not paired. Enter pairing code to enable protection.`;
+  }
+
+  // enable/disable buttons
+  $applyDNSBtnEl?.toggleAttribute("disabled", !isPaired);
+  $dnsStatusBtnEl?.toggleAttribute("disabled", false);
+
+  // show/hide pairing section
+  const pairingSection = document.querySelector('[data-section="pairing"]') as HTMLElement | null;
+  if (pairingSection) {
+    if (isPaired) hide(pairingSection); else show(pairingSection);
+  }
+
+  // badge
+  setPairStatus(isPaired ? "paired" : "not paired");
+}
+
 // ---- actions ---------------------------------------------------------------
 async function pingHealth() {
   try {
-    const r = await fetch(HEALTH, { cache: "no-store" });
+    const r = await fetchWithTimeout(HEALTH, {}, 1200);
     const { body, raw } = await safeJson(r);
     if (!r.ok) throw new Error(`HTTP ${r.status}${raw ? " • " + raw : ""}`);
+
+    // reflect daemon state (NEW)
+    isPaired   = !!(body?.paired);
+    currentCid = body?.cid || "";
+
     setDaemonBadge("running");
     if (body) updateDeviceInfo(body);
     const a = $daemonA(); if (a) a.href = HEALTH;
+
+    renderUI(); // NEW
     return true;
   } catch (e: any) {
     setDaemonBadge("starting...");
+    isPaired = false;                    // NEW
+    renderUI();                          // NEW
     setPairStatus("error");
     showPairMessage(`Health error: ${e?.message || e}`);
     return false;
@@ -116,11 +213,18 @@ async function doPair() {
       showPairMessage(`Pairing failed: HTTP ${r.status} • ${raw}`);
       return;
     }
+
+    // update local state (NEW)
+    isPaired   = true;
+    currentCid = body?.cid || currentCid;
+
     if (body) updateDeviceInfo(body);
     setPairStatus("paired");
-    await doRefresh(); // verify + hydrate
+    renderUI();               // NEW
 
-    // Auto-apply SafeNet DNS once paired
+    await doRefresh();        // verify + hydrate
+
+    // Auto-apply exactly once after successful pair (kept as requested)
     await applyDNS();
   } catch (e: any) {
     setPairStatus("error");
@@ -130,10 +234,18 @@ async function doPair() {
 
 async function doRefresh() {
   try {
-    const r = await fetch(CONFIG, { cache: "no-store" });
+    const r = await fetchWithTimeout(CONFIG, {}, 1500);
     const { body, raw } = await safeJson(r);
     if (!r.ok) throw new Error(`HTTP ${r.status}${raw ? " • " + raw : ""}`);
-    if (body) updateDeviceInfo(body);
+
+    // also sync state from /config if it exposes paired/cid (safe no-op otherwise)
+    if (body) {
+      isPaired   = !!(body?.paired ?? isPaired);
+      currentCid = body?.cid || currentCid;
+      updateDeviceInfo(body);
+    }
+
+    renderUI(); // NEW
     await pingHealth();
   } catch (e: any) {
     setPairStatus("error");
@@ -143,17 +255,20 @@ async function doRefresh() {
 
 async function startDaemon() {
   try {
-    await invoke?.("daemon_start");
+    await i("daemon_start");
     setDaemonBadge("starting...");
-    setTimeout(() => { void pingHealth(); }, 700);
+    await waitForDaemon();
+    await pingHealth();
   } catch (e: any) {
     showPairMessage(`Start error: ${e?.toString()}`);
   }
 }
 async function stopDaemon() {
   try {
-    await invoke?.("daemon_stop");
+    await i("daemon_stop");
     setDaemonBadge("starting...");
+    isPaired = false;         // NEW: reflect unknown state after stop
+    renderUI();               // NEW
   } catch (e: any) {
     showPairMessage(`Stop error: ${e?.toString()}`);
   }
@@ -162,35 +277,83 @@ async function stopDaemon() {
 // ---- DNS controls via Tauri commands --------------------------------------
 async function applyDNS() {
   try {
-    const res = await invoke?.("apply_dns", { primary: PRIMARY_DNS, secondary: SECONDARY_DNS });
-    showPairMessage(`DNS applied • ${String(res)}`);
+    const res = await i<string>("apply_dns", { primary: PRIMARY_DNS, secondary: SECONDARY_DNS });
+    let out = String(res); try { out = JSON.stringify(JSON.parse(out), null, 2); } catch {}
+    showPairMessage(`DNS applied • ${out}`);
   } catch (e: any) {
-    // Common case: not elevated → Set-DnsClientServerAddress access denied.
-    showPairMessage(`Apply DNS error: ${e?.toString()}\nTip: run daemon/app as Administrator.`);
+    showPairMessage(`Apply DNS error: ${e?.toString()}\nTip: run as Administrator.`);
   }
 }
 
 async function resetDNS() {
   try {
-    const res = await invoke?.("reset_dns");
-    showPairMessage(`DNS reset • ${String(res)}`);
+    const res = await i<string>("reset_dns");
+    let out = String(res);
+    try { out = JSON.stringify(JSON.parse(out), null, 2); } catch {}
+    showPairMessage(`DNS reset • ${out}`);
   } catch (e: any) {
-    showPairMessage(`Reset DNS error: ${e?.toString()}\nTip: run daemon/app as Administrator.`);
+    showPairMessage(`Reset DNS error: ${e?.toString()}\nTip: run as Administrator.`);
   }
 }
 
 async function dnsStatus() {
   try {
-    const res = await invoke?.("dns_status");
-    showPairMessage(`DNS status:\n${String(res)}`);
+    const res = await i<string>("dns_status");
+    let out = String(res); try { out = JSON.stringify(JSON.parse(out), null, 2); } catch {}
+    showPairMessage(`DNS status:\n${out}`);
+    return out;
   } catch (e: any) {
     showPairMessage(`DNS status error: ${e?.toString()}`);
+    return null;
   }
+}
+
+function renderProtectedView(cid?: string) {
+  const root = document.querySelector('[data-section="pairing"]')?.parentElement || document.body;
+
+  const box = document.createElement("div");
+  box.className = "card";
+  box.innerHTML = `
+    <h3 style="margin:0 0 12px 0;">This device is protected by SafeNet</h3>
+    <div style="font-size:14px;opacity:.85">
+      ${cid ? `CID: <code>${cid}</code><br/>` : ""}
+      Filtering is enforced at the system level.
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <h3 style="margin:0 0 12px 0;">DNS Controls</h3>
+      <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        <button id="applyDNS" class="btn">Apply SafeNet DNS</button>
+        <button id="dnsStatus" class="btn btn-outline">Show DNS Status</button>
+      </div>
+    </div>
+  `;
+  root.replaceChildren(box);
+
+  // attach the event listeners again after re-render
+  const applyBtn = document.getElementById("applyDNS");
+  const statusBtn = document.getElementById("dnsStatus");
+  applyBtn?.addEventListener("click", () => void applyDNS());
+  statusBtn?.addEventListener("click", () => void dnsStatus());
+}
+
+
+async function reEnforceLoop() {
+  setInterval(async () => {
+    try {
+      await pingHealth();
+      const statusText = await dnsStatus();
+      if (statusText) {
+        if (!statusText.includes("3.129.187.175") && !statusText.includes(PRIMARY_DNS)) {
+          if (isPaired) await applyDNS(); // only enforce if paired
+        }
+      }
+    } catch {}
+  }, POLL_MS);
 }
 
 // ---- dynamic DNS block (renders if missing in HTML) -----------------------
 function ensureDNSControls() {
-  // Insert after the "Pairing" section if possible
   const pairingBox = document.querySelector('[data-section="pairing"]') || document.body;
 
   const card = document.createElement("div");
@@ -199,41 +362,114 @@ function ensureDNSControls() {
   card.innerHTML = `
     <h3 style="margin:0 0 12px 0;">DNS Controls</h3>
     <div style="display:flex; gap:8px; flex-wrap:wrap;">
-      <button id="applyDNS" class="btn">Apply SafeNet DNS</button>
-      <button id="resetDNS" class="btn">Reset to DHCP</button>
+      <button id="applyDNS" class="btn" disabled>Apply SafeNet DNS</button>
       <button id="dnsStatus" class="btn btn-outline">Show DNS Status</button>
     </div>
   `;
-  pairingBox.parentElement?.insertBefore(card, pairingBox.nextSibling);
+  pairingBox.parentElement?.insertBefore(card, (pairingBox as any).nextSibling);
 
   $applyDNSBtnEl = document.getElementById("applyDNS") as HTMLButtonElement;
-  $resetDNSBtnEl = document.getElementById("resetDNS") as HTMLButtonElement;
   $dnsStatusBtnEl = document.getElementById("dnsStatus") as HTMLButtonElement;
 
   $applyDNSBtnEl?.addEventListener("click", () => void applyDNS());
-  $resetDNSBtnEl?.addEventListener("click", () => void resetDNS());
   $dnsStatusBtnEl?.addEventListener("click", () => void dnsStatus());
+
+  renderUI(); // NEW: set initial disabled/enabled
 }
 
 // ---- wire up ---------------------------------------------------------------
 function wire() {
-  $pairBtn()?.addEventListener("click", () => void doPair());
-  $refreshBtn()?.addEventListener("click", () => void doRefresh());
-  $startBtn()?.addEventListener("click", () => void startDaemon());
-  $stopBtn()?.addEventListener("click", () => void stopDaemon());
-
-  // Build DNS controls dynamically so no HTML edits are needed
   ensureDNSControls();
 
-  setDaemonBadge("starting...");
-  setPairStatus("not paired");
-  const a = $daemonA(); if (a) a.href = HEALTH;
+  if (CHILD_MODE) {
+    hide($startBtn());
+    hide($stopBtn());
 
-  void pingHealth();
+    // In child mode, show pairing when unpaired.
+    const pairingSection = document.querySelector('[data-section="pairing"]') as HTMLElement | null;
+
+    setDaemonBadge("starting...");
+    const a = $daemonA(); if (a) a.href = HEALTH;
+
+    i("daemon_start").catch(() => { /* ignore */ });
+
+    (async () => {
+      const ok = await waitForDaemon();
+      if (!ok) {
+        setPairStatus("error");
+        showPairMessage("Could not reach the SafeNet service. Close and reopen as Administrator.");
+        if (pairingSection) show(pairingSection);
+        return;
+      }
+
+      try {
+        await pingHealth();
+
+        // Read config to hydrate CID if present (optional)
+        const r = await fetchWithTimeout(CONFIG, {}, 1500);
+        const { body } = await safeJson(r);
+        if (body?.cid && !currentCid) currentCid = body.cid;
+        renderUI();
+
+        if (!isPaired) {
+          if (pairingSection) show(pairingSection);
+          $pairBtn()?.addEventListener("click", async () => {
+            await doPair();              // will set isPaired + renderUI + auto-apply once
+            reEnforceLoop();
+          });
+        } else {
+          // already paired, no auto-apply; user (or policy) can apply explicitly
+          if (pairingSection) hide(pairingSection);
+          reEnforceLoop();
+        }
+      } catch {
+        if (pairingSection) show(pairingSection);
+      }
+    })();
+
+    // no Reset button exposed in child mode
+    const resetBtn = document.getElementById("resetDNS");
+    if (resetBtn) resetBtn.remove();
+  } else {
+    $pairBtn()?.addEventListener("click", () => void doPair());
+    $refreshBtn()?.addEventListener("click", () => void doRefresh());
+    $startBtn()?.addEventListener("click", () => void i("daemon_start"));
+    $stopBtn()?.addEventListener("click", () => void i("daemon_stop"));
+
+    setDaemonBadge("starting...");
+    const a = $daemonA(); if (a) a.href = HEALTH;
+
+    (async () => {
+      await waitForDaemon();
+      await pingHealth();
+    })();
+  }
 }
 
 if (document.readyState === "loading") {
   document.addEventListener("DOMContentLoaded", wire);
 } else {
   wire();
+}
+
+/* --------------------------------------------------------------------------
+   APPENDED HELPERS (kept) – now call the safe wrapper `i(...)`
+-------------------------------------------------------------------------- */
+async function _invoke<T>(cmd: string, args?: any): Promise<T> {
+  return await i<T>(cmd, args);
+}
+
+async function filteringOn(cid: string, interfaces = ["Wi-Fi"]) {
+  return await _invoke<string>("sn_enforce_dns", { enable: true, cid, interfaces });
+}
+
+async function filteringOff(interfaces = ["Wi-Fi"]) {
+  return await _invoke<string>("sn_enforce_dns", { enable: false, interfaces });
+}
+
+async function showDnsStatus() {
+  const json = await _invoke<any>("sn_dns_status");
+  console.log("DNS status:", json);
+  const elx = document.getElementById("dns-status");
+  if (elx) elx.textContent = JSON.stringify(json, null, 2);
 }

@@ -1,41 +1,23 @@
-# Node / Vite / Tauri web
-node_modules/
-dist/
-.vite/
-*.log
+﻿safenet-app/node_modules/
+safenet-app/dist/
+safenet-app/.vite/
+safenet-app/src-tauri/target/
+safenet-app/src-tauri/bundled/
 
-# Rust / Tauri
-target/
-src-tauri/target/
-src-tauri/.tauri-lock
-
-# Go
+# binaries (keep sources)
 *.exe
-*.test
-*.out
+*.msi
+*.pdb
+*.dll
+daemon/safenet-daemon.exe
 
-# OS / editor
+# IDE/OS
+.vscode/
+.idea/
 .DS_Store
 Thumbs.db
-*.swp
 
-# Env & secrets
+# env/local
 .env
 .env.*
-infra/certs/
-infra/certbot/
-*.pem
-*.key
-*.pfx
-
-# Build artifacts / installers
-*.zip
-*.7z
-*.msi
-*.pkg
-*.dmg
-
-# App caches
-pnpm-lock.yaml
-yarn.lock
-package-lock.json
+C:/ProgramData/SafeNet/config.json
