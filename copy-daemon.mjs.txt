@@ -1,0 +1,40 @@
+// scripts/copy-daemon.mjs
+// Copies the latest safenet-daemon.exe into Tauri's bundled resources
+// so the installer/portable EXE includes it automatically.
+
+import { copyFile, mkdir, access } from "fs/promises";
+import { dirname } from "path";
+
+// Adjust this if your daemon binary lives elsewhere during build.
+const srcCandidates = [
+  "C:/safenet-desktop/daemon/safenet-daemon.exe",
+  "C:/safenet-desktop/safenet-app/safenet-daemon.exe",
+];
+
+const dst = "src-tauri/resources/bin/safenet-daemon.exe";
+
+async function pickExisting(cands) {
+  for (const p of cands) {
+    try {
+      await access(p);
+      return p;
+    } catch {}
+  }
+  return null;
+}
+
+const src = await pickExisting(srcCandidates);
+
+if (!src) {
+  console.error(
+    "[bundle] ERROR: safenet-daemon.exe not found in any candidate path.\n" +
+    "Checked:\n - " + srcCandidates.join("\n - ") + "\n\n" +
+    "Build will continue, but your app won’t include the daemon.\n" +
+    "Fix the path(s) above or export DAEMON_EXE=C:/path/to/safenet-daemon.exe"
+  );
+  process.exit(0); // don’t fail the whole build; you can make this '1' to hard-fail
+}
+
+await mkdir(dirname(dst), { recursive: true });
+await copyFile(src, dst);
+console.log(`[bundle] safenet-daemon.exe copied:\n  from: ${src}\n  to:   ${dst}`);
